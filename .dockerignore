@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+.git
+.github
+.env
+.env.*
+!.env.example
+npm-debug.log*
+generated/prisma
+.vscode
+.idea
+.claude
+.windsurf
+.agents
+.DS_Store
+Thumbs.db
