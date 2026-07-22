@@ -1,17 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from './common/prisma/prisma.service';
-
-export interface HealthCheckResponse {
-  status: 'ok';
-  database: 'connected';
-  timestamp: string;
-}
+import { HealthResponseDto } from './health-response.dto';
 
 @Injectable()
 export class AppService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async getHealth(): Promise<HealthCheckResponse> {
+  async getHealth(): Promise<HealthResponseDto> {
     await this.prisma.$queryRaw`SELECT 1`;
 
     return {
