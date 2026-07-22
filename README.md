@@ -98,6 +98,47 @@ Roles:
 
 Refresh tokens are stored as hashes and rotated on every refresh. Reusing an old refresh token returns `401 Unauthorized`.
 
+## Phase 02: Concert Management
+
+Phase 02 adds concert and ticket category management.
+
+Operator APIs require a bearer token for an `OPERATOR` account:
+
+- `POST /operator/concerts`
+- `GET /operator/concerts`
+- `GET /operator/concerts/:id`
+- `PATCH /operator/concerts/:id`
+- `DELETE /operator/concerts/:id`
+- `PATCH /operator/concerts/:id/publish`
+- `POST /operator/concerts/:concertId/ticket-categories`
+- `GET /operator/concerts/:concertId/ticket-categories`
+- `GET /operator/concerts/:concertId/ticket-categories/:categoryId`
+- `PATCH /operator/concerts/:concertId/ticket-categories/:categoryId`
+- `DELETE /operator/concerts/:concertId/ticket-categories/:categoryId`
+
+Public APIs do not require authentication:
+
+- `GET /concerts`
+- `GET /concerts/:id`
+
+The supported concert lifecycle is currently:
+
+- `DRAFT`: operator can edit concerts and ticket categories.
+- `PUBLISHED`: public users can browse and view details.
+
+Cancellation and unpublish flows are not implemented.
+
+Local demonstration flow:
+
+1. Seed the operator and demo concerts with `npx prisma db seed`.
+2. Login with the seeded operator account.
+3. Create a draft concert with `POST /operator/concerts`.
+4. Create ticket categories under the concert.
+5. Publish the concert with `PATCH /operator/concerts/:id/publish`.
+6. Browse published concerts with `GET /concerts`.
+
+Swagger is available at `http://localhost:3000/api/docs`. Apply migrations with `npx prisma migrate deploy` for a local database that should not create new development migrations.
+
 ## Verification
 
 ```bash

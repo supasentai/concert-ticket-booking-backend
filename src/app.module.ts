@@ -6,6 +6,8 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { ConcertsModule } from './concerts/concerts.module';
+import { TicketCategoriesModule } from './ticket-categories/ticket-categories.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
@@ -52,6 +54,8 @@ import { UsersModule } from './users/users.module';
     PrismaModule,
     AuthModule,
     UsersModule,
+    ConcertsModule,
+    TicketCategoriesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
