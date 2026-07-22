@@ -3,6 +3,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import * as bcrypt from 'bcryptjs';
 import {
   ConcertStatus,
+  Prisma,
   PrismaClient,
   Role,
   VoucherDiscountType,
@@ -31,6 +32,9 @@ const seedOperatorFullName = operatorFullName;
 const demoPublishedTitle = 'Demo Published Future Concert';
 const demoDraftTitle = 'Demo Draft Concert';
 const demoEndedTitle = 'Demo Ended Published Concert';
+const demoCustomerEmail = 'demo-customer@example.com';
+const demoCustomerPassword = 'Password123';
+const demoCustomerFullName = 'Demo Customer';
 
 const activeVoucherStartsAt = new Date('2026-01-01T00:00:00.000Z');
 const activeVoucherExpiresAt = new Date('2035-12-31T23:59:59.999Z');
@@ -75,8 +79,9 @@ async function main(): Promise<void> {
       });
     }
 
-    await seedDemoConcerts(prisma, operator.id);
+    const publishedConcert = await seedDemoConcerts(prisma, operator.id);
     await seedDemoVouchers(prisma);
+    await seedDemoBookings(prisma, publishedConcert.id);
   } finally {
     await prisma.$disconnect();
   }
@@ -85,7 +90,7 @@ async function main(): Promise<void> {
 async function seedDemoConcerts(
   prisma: PrismaClient,
   operatorId: string,
-): Promise<void> {
+): Promise<{ id: string }> {
   const publishedConcert = await upsertConcertByTitle(prisma, demoPublishedTitle, {
     description: 'Seeded published concert for local browsing demos.',
     venue: 'Demo Arena',
@@ -160,6 +165,8 @@ async function seedDemoConcerts(
     quantity: 200,
     isActive: true,
   });
+
+  return publishedConcert;
 }
 
 async function seedDemoVouchers(prisma: PrismaClient): Promise<void> {
@@ -346,6 +353,185 @@ async function upsertTicketCategory(
       ...data,
     },
     update: data,
+  });
+}
+
+async function seedDemoBookings(
+  prisma: PrismaClient,
+  concertId: string,
+): Promise<void> {
+  const customer = await upsertDemoCustomer(prisma);
+  const existingStatusCounts = await prisma.booking.groupBy({
+    by: ['status'],
+    where: {
+      userId: customer.id,
+      concertId,
+    },
+    _count: { status: true },
+  });
+  const hasStatus = new Set(
+    existingStatusCounts
+      .filter((item) => item._count.status > 0)
+      .map((item) => item.status),
+  );
+
+  const categories = await prisma.ticketCategory.findMany({
+    where: {
+      concertId,
+      name: { in: ['General Admission', 'VIP'] },
+    },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      quantity: true,
+    },
+  });
+  const generalAdmission = categories.find(
+    (category) => category.name === 'General Admission',
+  );
+  const vip = categories.find((category) => category.name === 'VIP');
+
+  if (!generalAdmission || !vip) {
+    throw new Error('Demo ticket categories are required for booking seed');
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (!hasStatus.has('PENDING')) {
+      await createSeedBooking(tx, {
+        userId: customer.id,
+        concertId,
+        ticketCategoryId: generalAdmission.id,
+        status: 'PENDING',
+        quantity: 1,
+        unitPrice: generalAdmission.price,
+        categoryQuantity: generalAdmission.quantity,
+        reserveTickets: true,
+      });
+    }
+
+    if (!hasStatus.has('PAID')) {
+      await createSeedBooking(tx, {
+        userId: customer.id,
+        concertId,
+        ticketCategoryId: generalAdmission.id,
+        status: 'PAID',
+        quantity: 2,
+        unitPrice: generalAdmission.price,
+        categoryQuantity: generalAdmission.quantity,
+        reserveTickets: true,
+      });
+    }
+
+    if (!hasStatus.has('CANCELLED')) {
+      await createSeedBooking(tx, {
+        userId: customer.id,
+        concertId,
+        ticketCategoryId: vip.id,
+        status: 'CANCELLED',
+        quantity: 1,
+        unitPrice: vip.price,
+        categoryQuantity: vip.quantity,
+        reserveTickets: false,
+      });
+    }
+  });
+}
+
+async function upsertDemoCustomer(
+  prisma: PrismaClient,
+): Promise<{ id: string }> {
+  const existing = await prisma.user.findUnique({
+    where: { email: demoCustomerEmail },
+    select: { id: true, role: true },
+  });
+
+  if (existing) {
+    if (existing.role !== Role.CUSTOMER) {
+      throw new Error(
+        `Demo customer email ${demoCustomerEmail} belongs to a non-customer user`,
+      );
+    }
+
+    await prisma.user.update({
+      where: { email: demoCustomerEmail },
+      data: { fullName: demoCustomerFullName },
+    });
+
+    return { id: existing.id };
+  }
+
+  return prisma.user.create({
+    data: {
+      email: demoCustomerEmail,
+      passwordHash: await bcrypt.hash(demoCustomerPassword, 12),
+      fullName: demoCustomerFullName,
+      role: Role.CUSTOMER,
+    },
+    select: { id: true },
+  });
+}
+
+async function createSeedBooking(
+  prisma: Prisma.TransactionClient,
+  data: {
+    userId: string;
+    concertId: string;
+    ticketCategoryId: string;
+    status: 'PENDING' | 'PAID' | 'CANCELLED';
+    quantity: number;
+    unitPrice: Prisma.Decimal;
+    categoryQuantity: number;
+    reserveTickets: boolean;
+  },
+): Promise<void> {
+  if (data.reserveTickets) {
+    const maxSoldBeforeReservation = data.categoryQuantity - data.quantity;
+
+    if (maxSoldBeforeReservation < 0) {
+      throw new Error('Demo booking ticket quantity is invalid');
+    }
+
+    const ticketUpdate = await prisma.ticketCategory.updateMany({
+      where: {
+        id: data.ticketCategoryId,
+        sold: {
+          lte: maxSoldBeforeReservation,
+        },
+      },
+      data: {
+        sold: {
+          increment: data.quantity,
+        },
+      },
+    });
+
+    if (ticketUpdate.count !== 1) {
+      throw new Error('Demo booking ticket reservation failed');
+    }
+  }
+
+  const lineTotal = data.unitPrice.mul(data.quantity);
+
+  await prisma.booking.create({
+    data: {
+      userId: data.userId,
+      concertId: data.concertId,
+      status: data.status,
+      subtotal: lineTotal.toString(),
+      discountAmount: '0',
+      totalAmount: lineTotal.toString(),
+      items: {
+        create: [
+          {
+            ticketCategoryId: data.ticketCategoryId,
+            quantity: data.quantity,
+            unitPrice: data.unitPrice.toString(),
+            lineTotal: lineTotal.toString(),
+          },
+        ],
+      },
+    },
   });
 }
 

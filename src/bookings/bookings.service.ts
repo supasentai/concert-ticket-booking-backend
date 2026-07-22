@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -16,6 +17,11 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { BookingResponseDto } from './dto/booking-response.dto';
 import { CreateBookingDto } from './dto/create-booking.dto';
+import { OperatorBookingQueryDto } from './dto/operator-booking-query.dto';
+import {
+  OperatorBookingResponseDto,
+  PaginatedOperatorBookingResponseDto,
+} from './dto/operator-booking-response.dto';
 
 const BOOKING_INCLUDE = {
   concert: {
@@ -38,6 +44,43 @@ const BOOKING_INCLUDE = {
 
 type BookingWithDetails = Prisma.BookingGetPayload<{
   include: typeof BOOKING_INCLUDE;
+}>;
+
+const OPERATOR_BOOKING_INCLUDE = {
+  user: {
+    select: {
+      id: true,
+      email: true,
+      fullName: true,
+    },
+  },
+  concert: {
+    select: {
+      id: true,
+      title: true,
+    },
+  },
+  voucherUsage: {
+    select: {
+      status: true,
+      releasedAt: true,
+      createdAt: true,
+    },
+  },
+  items: {
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    include: {
+      ticketCategory: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  },
+} satisfies Prisma.BookingInclude;
+
+type OperatorBookingWithDetails = Prisma.BookingGetPayload<{
+  include: typeof OPERATOR_BOOKING_INCLUDE;
 }>;
 
 type BookingTransaction = PrismaService | Prisma.TransactionClient;
@@ -206,6 +249,53 @@ export class BookingsService {
     return this.toResponse(booking);
   }
 
+  async findAllForOperator(
+    query: OperatorBookingQueryDto,
+  ): Promise<PaginatedOperatorBookingResponseDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const skip = (page - 1) * limit;
+    const where = this.buildOperatorBookingWhere(query);
+    const sortBy = query.sortBy ?? 'createdAt';
+    const sortOrder = query.sortOrder ?? 'desc';
+
+    const [bookings, total] = await this.prisma.$transaction([
+      this.prisma.booking.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ [sortBy]: sortOrder }, { id: 'asc' }],
+        include: OPERATOR_BOOKING_INCLUDE,
+      }),
+      this.prisma.booking.count({ where }),
+    ]);
+
+    return {
+      data: bookings.map((booking) => this.toOperatorResponse(booking)),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  async findOneForOperator(
+    bookingId: string,
+  ): Promise<OperatorBookingResponseDto> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: OPERATOR_BOOKING_INCLUDE,
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    return this.toOperatorResponse(booking);
+  }
+
   async pay(
     user: AuthenticatedUser,
     bookingId: string,
@@ -269,6 +359,38 @@ export class BookingsService {
     });
   }
 
+  async updateStatusForOperator(
+    bookingId: string,
+    status: BookingStatus,
+  ): Promise<OperatorBookingResponseDto> {
+    if (status !== BookingStatus.PAID && status !== BookingStatus.CANCELLED) {
+      throw new ConflictException(
+        'Only PENDING -> PAID and PENDING -> CANCELLED transitions are supported',
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const booking = await this.transitionPendingBookingByIdOrThrow(
+        tx,
+        bookingId,
+        status,
+        `Only pending bookings may transition to ${status}`,
+      );
+
+      if (status === BookingStatus.CANCELLED) {
+        await this.restoreReservedTickets(tx, booking);
+        await this.releaseVoucherUsage(tx, booking.id);
+      }
+
+      const updated = await tx.booking.findUniqueOrThrow({
+        where: { id: booking.id },
+        include: OPERATOR_BOOKING_INCLUDE,
+      });
+
+      return this.toOperatorResponse(updated);
+    });
+  }
+
   private async assertConcertExists(
     concertId: string,
     prisma: BookingTransaction = this.prisma,
@@ -311,10 +433,26 @@ export class BookingsService {
     status: BookingStatus,
     conflictMessage: string,
   ): Promise<BookingWithDetails> {
+    return this.transitionPendingBookingByIdOrThrow(
+      prisma,
+      bookingId,
+      status,
+      conflictMessage,
+      user.id,
+    );
+  }
+
+  private async transitionPendingBookingByIdOrThrow(
+    prisma: Prisma.TransactionClient,
+    bookingId: string,
+    status: BookingStatus,
+    conflictMessage: string,
+    userId?: string,
+  ): Promise<BookingWithDetails> {
     const updateResult = await prisma.booking.updateMany({
       where: {
         id: bookingId,
-        userId: user.id,
+        ...(userId ? { userId } : {}),
         status: BookingStatus.PENDING,
       },
       data: { status },
@@ -340,7 +478,7 @@ export class BookingsService {
       throw new NotFoundException('Booking not found');
     }
 
-    if (booking.userId !== user.id) {
+    if (userId && booking.userId !== userId) {
       throw new ForbiddenException('Cannot access another customer booking');
     }
 
@@ -572,6 +710,108 @@ export class BookingsService {
         booking.voucherDiscountValueSnapshot?.toString() ?? null,
       voucherMaximumDiscountAmount:
         booking.voucherMaximumDiscountAmountSnapshot?.toString() ?? null,
+      items: booking.items.map((item) => ({
+        id: item.id,
+        ticketCategoryId: item.ticketCategoryId,
+        ticketCategoryName: item.ticketCategory.name,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice.toString(),
+        lineTotal: item.lineTotal.toString(),
+      })),
+      createdAt: booking.createdAt,
+      updatedAt: booking.updatedAt,
+    };
+  }
+
+  private buildOperatorBookingWhere(
+    query: OperatorBookingQueryDto,
+  ): Prisma.BookingWhereInput {
+    const where: Prisma.BookingWhereInput = {};
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    if (query.concertId) {
+      where.concertId = query.concertId;
+    }
+
+    if (query.customerId) {
+      where.userId = query.customerId;
+    }
+
+    if (query.createdFrom || query.createdTo) {
+      const createdAt: Prisma.DateTimeFilter = {};
+
+      if (query.createdFrom) {
+        createdAt.gte = new Date(query.createdFrom);
+      }
+
+      if (query.createdTo) {
+        createdAt.lte = new Date(query.createdTo);
+      }
+
+      if (
+        createdAt.gte instanceof Date &&
+        createdAt.lte instanceof Date &&
+        createdAt.gte > createdAt.lte
+      ) {
+        throw new BadRequestException(
+          'createdFrom must be earlier than or equal to createdTo',
+        );
+      }
+
+      where.createdAt = createdAt;
+    }
+
+    if (query.search) {
+      const search = query.search.trim();
+
+      if (search) {
+        where.OR = [
+          { id: { contains: search, mode: 'insensitive' } },
+          { user: { email: { contains: search, mode: 'insensitive' } } },
+          { user: { fullName: { contains: search, mode: 'insensitive' } } },
+          { concert: { title: { contains: search, mode: 'insensitive' } } },
+        ];
+      }
+    }
+
+    return where;
+  }
+
+  private toOperatorResponse(
+    booking: OperatorBookingWithDetails,
+  ): OperatorBookingResponseDto {
+    const totalQuantity = booking.items.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
+
+    return {
+      id: booking.id,
+      status: booking.status,
+      customer: {
+        id: booking.user.id,
+        email: booking.user.email,
+        fullName: booking.user.fullName,
+      },
+      concert: {
+        id: booking.concert.id,
+        title: booking.concert.title,
+      },
+      totalQuantity,
+      subtotal: booking.subtotal.toString(),
+      discountAmount: booking.discountAmount.toString(),
+      totalAmount: booking.totalAmount.toString(),
+      voucher: {
+        code: booking.voucherCodeSnapshot,
+        discountType: booking.voucherDiscountTypeSnapshot,
+        discountValue: booking.voucherDiscountValueSnapshot?.toString() ?? null,
+        maximumDiscountAmount:
+          booking.voucherMaximumDiscountAmountSnapshot?.toString() ?? null,
+        usageStatus: booking.voucherUsage?.status ?? null,
+      },
       items: booking.items.map((item) => ({
         id: item.id,
         ticketCategoryId: item.ticketCategoryId,

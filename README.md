@@ -306,6 +306,92 @@ Content-Type: application/json
 
 `voucherCode` is optional; bookings without a voucher keep `discountAmount` at zero and all voucher fields as `null`.
 
+## Phase 05: Operation Dashboard APIs
+
+Phase 05 adds operator-only monitoring endpoints for operations dashboards. These endpoints reuse the existing `OPERATOR` RBAC guard and require a bearer access token.
+
+Dashboard summary:
+
+```http
+GET /operator/dashboard/summary
+Authorization: Bearer <operator-access-token>
+```
+
+The summary includes concert counts, booking counts by status, paid gross revenue, paid ticket quantity, and currently active vouchers. `grossRevenue` includes only `PAID` bookings. `ticketsSold` is based on paid booking items so cancelled bookings are not double-counted.
+
+Booking monitoring:
+
+```http
+GET /operator/bookings
+Authorization: Bearer <operator-access-token>
+```
+
+Supported filters:
+
+- `page`, `limit`
+- `status`
+- `concertId`
+- `customerId`
+- `search`
+- `createdFrom`, `createdTo`
+- `sortBy`
+- `sortOrder`
+
+`createdFrom` and `createdTo` are inclusive ISO datetime boundaries. `search` matches booking id, customer email/name, or concert title. The response uses the existing paginated shape:
+
+```json
+{
+  "data": [],
+  "meta": {
+    "page": 1,
+    "limit": 20,
+    "total": 0,
+    "totalPages": 0
+  }
+}
+```
+
+Booking detail:
+
+```http
+GET /operator/bookings/<booking-id>
+Authorization: Bearer <operator-access-token>
+```
+
+The detail response includes customer summary, concert summary, booking totals, voucher snapshot summary, booking items, and timestamps. Password hashes and refresh-token hashes are never returned.
+
+Operator booking status transitions:
+
+```http
+PATCH /operator/bookings/<booking-id>/status
+Authorization: Bearer <operator-access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "status": "CANCELLED"
+}
+```
+
+Supported transition matrix:
+
+| Current status | Target status | Result |
+| -------------- | ------------- | ------ |
+| `PENDING`      | `PAID`        | Allowed |
+| `PENDING`      | `CANCELLED`   | Allowed |
+| `PENDING`      | `PENDING`     | `409 Conflict` |
+| `PAID`         | any status    | `409 Conflict` |
+| `CANCELLED`    | any status    | `409 Conflict` |
+
+Operator cancellation uses the same atomic side effects as customer cancellation: ticket inventory is restored, voucher usage is released once when present, and duplicate transitions return `409 Conflict`.
+
+Existing operator creation APIs are used by dashboards instead of duplicate dashboard-specific create endpoints:
+
+- `POST /operator/concerts`
+- `POST /operator/concerts/:concertId/ticket-categories`
+- `POST /vouchers`
+
 ## Verification
 
 ```bash

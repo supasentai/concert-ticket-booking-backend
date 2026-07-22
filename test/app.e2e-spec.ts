@@ -155,6 +155,61 @@ type PaginatedPublicConcertResponse = {
   };
 };
 
+type DashboardSummaryResponse = {
+  totalConcerts: number;
+  publishedConcerts: number;
+  draftConcerts: number;
+  totalBookings: number;
+  pendingBookings: number;
+  paidBookings: number;
+  cancelledBookings: number;
+  grossRevenue: string;
+  ticketsSold: number;
+  activeVouchers: number;
+};
+
+type OperatorBookingResponse = {
+  id: string;
+  status: BookingStatus;
+  customer: {
+    id: string;
+    email: string;
+    fullName: string | null;
+    passwordHash?: string;
+    refreshTokenHash?: string;
+  };
+  concert: {
+    id: string;
+    title: string;
+  };
+  totalQuantity: number;
+  subtotal: string;
+  discountAmount: string;
+  totalAmount: string;
+  voucher: {
+    code: string | null;
+    discountType: VoucherDiscountType | null;
+    discountValue: string | null;
+    maximumDiscountAmount: string | null;
+    usageStatus: VoucherUsageStatus | null;
+  };
+  items: BookingResponse['items'];
+  createdAt: string;
+  updatedAt: string;
+  passwordHash?: string;
+  refreshTokenHash?: string;
+};
+
+type PaginatedOperatorBookingResponse = {
+  data: OperatorBookingResponse[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+};
+
 describe('Concert ticket booking API (e2e)', () => {
   let app: INestApplication<App>;
   let pool: Pool;
@@ -1767,6 +1822,461 @@ describe('Concert ticket booking API (e2e)', () => {
         .get('/bookings/me')
         .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
         .expect(403);
+    });
+  });
+
+  describe('operator dashboard and booking monitoring', () => {
+    it('protects all Phase 05 operator routes', async () => {
+      const booking = (
+        await createBooking(publishedConcert.id, publishedCategory.id, 1)
+      ).body as BookingResponse;
+
+      for (const route of [
+        '/operator/dashboard/summary',
+        '/operator/bookings',
+        `/operator/bookings/${booking.id}`,
+      ]) {
+        await request(app.getHttpServer()).get(route).expect(401);
+        await request(app.getHttpServer())
+          .get(route)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .expect(403);
+      }
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${booking.id}/status`)
+        .send({ status: BookingStatus.PAID })
+        .expect(401);
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${booking.id}/status`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(403);
+    });
+
+    it('returns dashboard summary metrics from persisted bookings', async () => {
+      const beforeResponse = await request(app.getHttpServer())
+        .get('/operator/dashboard/summary')
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const before = beforeResponse.body as DashboardSummaryResponse;
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Summary`,
+        10,
+      );
+      const pending = (await createBooking(concert.id, category.id, 1))
+        .body as BookingResponse;
+      const paid = (await createBooking(concert.id, category.id, 2))
+        .body as BookingResponse;
+      const cancelled = (await createBooking(concert.id, category.id, 3))
+        .body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${paid.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(200);
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${cancelled.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.CANCELLED })
+        .expect(200);
+
+      const afterResponse = await request(app.getHttpServer())
+        .get('/operator/dashboard/summary')
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const after = afterResponse.body as DashboardSummaryResponse;
+
+      expect(after.totalConcerts).toBeGreaterThanOrEqual(
+        before.totalConcerts + 1,
+      );
+      expect(after.publishedConcerts).toBeGreaterThanOrEqual(
+        before.publishedConcerts + 1,
+      );
+      expect(after.totalBookings).toBe(before.totalBookings + 3);
+      expect(after.pendingBookings).toBe(before.pendingBookings + 1);
+      expect(after.paidBookings).toBe(before.paidBookings + 1);
+      expect(after.cancelledBookings).toBe(before.cancelledBookings + 1);
+      expect(Number(after.grossRevenue)).toBeCloseTo(
+        Number(before.grossRevenue) + Number(paid.totalAmount),
+        2,
+      );
+      expect(after.ticketsSold).toBe(before.ticketsSold + 2);
+      expect(after.activeVouchers).toBeGreaterThanOrEqual(0);
+      await expectCategorySold(category.id, 3);
+      await expectBookingStatus(pending.id, BookingStatus.PENDING);
+    });
+
+    it('lists bookings with pagination, filters, search, and sorting', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard List`,
+        10,
+      );
+      const pending = (await createBooking(concert.id, category.id, 1))
+        .body as BookingResponse;
+      const paid = (await createBooking(concert.id, category.id, 2))
+        .body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${paid.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(200);
+
+      const paidDetail = (
+        await request(app.getHttpServer())
+          .get(`/operator/bookings/${paid.id}`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .expect(200)
+      ).body as OperatorBookingResponse;
+      const createdAt = new Date(paidDetail.createdAt);
+
+      const listResponse = await request(app.getHttpServer())
+        .get('/operator/bookings')
+        .query({
+          page: 1,
+          limit: 5,
+          status: BookingStatus.PAID,
+          concertId: concert.id,
+          customerId: customer.user.id,
+          search: `${titlePrefix} Dashboard List`,
+          createdFrom: new Date(createdAt.getTime() - 1000).toISOString(),
+          createdTo: new Date(createdAt.getTime() + 1000).toISOString(),
+          sortBy: 'createdAt',
+          sortOrder: 'desc',
+        })
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const list = listResponse.body as PaginatedOperatorBookingResponse;
+
+      expect(list.meta.page).toBe(1);
+      expect(list.meta.limit).toBe(5);
+      expect(list.data.map((booking) => booking.id)).toContain(paid.id);
+      expect(list.data.map((booking) => booking.id)).not.toContain(pending.id);
+      expect(
+        list.data.every(
+          (booking) =>
+            booking.status === BookingStatus.PAID &&
+            booking.concert.id === concert.id &&
+            booking.customer.id === customer.user.id,
+        ),
+      ).toBe(true);
+
+      const searchResponse = await request(app.getHttpServer())
+        .get('/operator/bookings')
+        .query({ search: paid.id, limit: 10 })
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const search = searchResponse.body as PaginatedOperatorBookingResponse;
+
+      expect(search.data.map((booking) => booking.id)).toContain(paid.id);
+    });
+
+    it('rejects invalid booking monitor query values', async () => {
+      const invalidQueries = [
+        { page: 0 },
+        { limit: 101 },
+        { status: 'REFUNDED' },
+        { concertId: 'not-a-uuid' },
+        { customerId: 'not-a-uuid' },
+        { createdFrom: 'not-a-date' },
+        { sortBy: 'email' },
+        { sortOrder: 'sideways' },
+        {
+          createdFrom: '2028-01-02T00:00:00.000Z',
+          createdTo: '2028-01-01T00:00:00.000Z',
+        },
+      ];
+
+      for (const query of invalidQueries) {
+        await request(app.getHttpServer())
+          .get('/operator/bookings')
+          .query(query)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .expect(400);
+      }
+    });
+
+    it('returns booking details without sensitive customer fields', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Detail`,
+        3,
+      );
+      const booking = (await createBooking(concert.id, category.id, 2))
+        .body as BookingResponse;
+
+      const response = await request(app.getHttpServer())
+        .get(`/operator/bookings/${booking.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const detail = response.body as OperatorBookingResponse;
+
+      expect(detail.id).toBe(booking.id);
+      expect(detail.customer.email).toBe(customer.user.email);
+      expect(detail.customer.passwordHash).toBeUndefined();
+      expect(detail.customer.refreshTokenHash).toBeUndefined();
+      expect(detail.passwordHash).toBeUndefined();
+      expect(detail.refreshTokenHash).toBeUndefined();
+      expect(detail.items).toHaveLength(1);
+      expect(detail.items[0]).toMatchObject({
+        quantity: 2,
+        unitPrice: '49.99',
+        lineTotal: '99.98',
+      });
+
+      await request(app.getHttpServer())
+        .get(`/operator/bookings/${randomUUID()}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(404);
+    });
+
+    it('supports valid operator status transitions and rejects illegal rewrites', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Status`,
+        6,
+      );
+      const paid = (await createBooking(concert.id, category.id, 1))
+        .body as BookingResponse;
+      const cancelled = (await createBooking(concert.id, category.id, 2))
+        .body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${paid.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(200)
+        .expect((response) => {
+          const body = response.body as OperatorBookingResponse;
+
+          expect(body.status).toBe(BookingStatus.PAID);
+        });
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${paid.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(409);
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${paid.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.CANCELLED })
+        .expect(409);
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${cancelled.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.CANCELLED })
+        .expect(200);
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${cancelled.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PENDING })
+        .expect(409);
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${randomUUID()}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.PAID })
+        .expect(404);
+
+      await expectCategorySold(category.id, 1);
+    });
+
+    it('preserves voucher restoration when an operator cancels a booking', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Voucher Cancel`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Dashboard Voucher`, {
+            usageLimit: 2,
+            perUserUsageLimit: 1,
+          }),
+        )
+      ).body as VoucherResponse;
+      const booking = (
+        await createBooking(concert.id, category.id, 1, undefined, voucher.code)
+      ).body as BookingResponse;
+
+      await expectVoucherState(voucher.id, customer.user.id, {
+        usedCount: 1,
+        activeUsageCount: 1,
+        releasedUsageCount: 0,
+        userUsedCount: 1,
+      });
+
+      await request(app.getHttpServer())
+        .patch(`/operator/bookings/${booking.id}/status`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ status: BookingStatus.CANCELLED })
+        .expect(200);
+
+      await expectCategorySold(category.id, 0);
+      await expectVoucherState(voucher.id, customer.user.id, {
+        usedCount: 0,
+        activeUsageCount: 0,
+        releasedUsageCount: 1,
+        userUsedCount: 0,
+      });
+    });
+
+    it('prevents duplicate operator transitions under concurrency', async () => {
+      const payFixture = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Concurrent Pay`,
+        2,
+      );
+      const payBooking = (
+        await createBooking(payFixture.concert.id, payFixture.category.id, 1)
+      ).body as BookingResponse;
+      const payResponses = await Promise.all([
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${payBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.PAID }),
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${payBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.PAID }),
+      ]);
+      const payStatuses = payResponses.map((response) => response.status);
+
+      expect(payStatuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(payStatuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectBookingStatus(payBooking.id, BookingStatus.PAID);
+      await expectCategorySold(payFixture.category.id, 1);
+
+      const cancelFixture = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Concurrent Cancel`,
+        3,
+      );
+      const cancelBooking = (
+        await createBooking(
+          cancelFixture.concert.id,
+          cancelFixture.category.id,
+          2,
+        )
+      ).body as BookingResponse;
+      const cancelResponses = await Promise.all([
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${cancelBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.CANCELLED }),
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${cancelBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.CANCELLED }),
+      ]);
+      const cancelStatuses = cancelResponses.map((response) => response.status);
+
+      expect(cancelStatuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(cancelStatuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectBookingStatus(cancelBooking.id, BookingStatus.CANCELLED);
+      await expectCategorySold(cancelFixture.category.id, 0);
+    });
+
+    it('keeps customer and operator transition races consistent', async () => {
+      const operatorWins = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Operator Customer Race`,
+        2,
+      );
+      const operatorRaceBooking = (
+        await createBooking(
+          operatorWins.concert.id,
+          operatorWins.category.id,
+          1,
+        )
+      ).body as BookingResponse;
+      const operatorRaceResponses = await Promise.all([
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${operatorRaceBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.CANCELLED }),
+        request(app.getHttpServer())
+          .post(`/bookings/${operatorRaceBooking.id}/pay`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({ success: true }),
+      ]);
+      const operatorRaceStatuses = operatorRaceResponses.map(
+        (response) => response.status,
+      );
+      const operatorRaceFinal = await getBookingStatus(operatorRaceBooking.id);
+
+      expect(
+        operatorRaceStatuses.filter((status) => status === 200),
+      ).toHaveLength(1);
+      expect(
+        operatorRaceStatuses.filter((status) => status === 409),
+      ).toHaveLength(1);
+      expect([BookingStatus.PAID, BookingStatus.CANCELLED]).toContain(
+        operatorRaceFinal,
+      );
+      await expectCategorySold(
+        operatorWins.category.id,
+        operatorRaceFinal === BookingStatus.PAID ? 1 : 0,
+      );
+
+      const customerWins = await createPublishedBookingFixture(
+        `${titlePrefix} Dashboard Customer Operator Race`,
+        2,
+      );
+      const customerRaceBooking = (
+        await createBooking(
+          customerWins.concert.id,
+          customerWins.category.id,
+          1,
+        )
+      ).body as BookingResponse;
+      const customerRaceResponses = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/bookings/${customerRaceBooking.id}/cancel`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`),
+        request(app.getHttpServer())
+          .patch(`/operator/bookings/${customerRaceBooking.id}/status`)
+          .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+          .send({ status: BookingStatus.PAID }),
+      ]);
+      const customerRaceStatuses = customerRaceResponses.map(
+        (response) => response.status,
+      );
+      const customerRaceFinal = await getBookingStatus(customerRaceBooking.id);
+
+      expect(
+        customerRaceStatuses.filter((status) => status === 200),
+      ).toHaveLength(1);
+      expect(
+        customerRaceStatuses.filter((status) => status === 409),
+      ).toHaveLength(1);
+      expect([BookingStatus.PAID, BookingStatus.CANCELLED]).toContain(
+        customerRaceFinal,
+      );
+      await expectCategorySold(
+        customerWins.category.id,
+        customerRaceFinal === BookingStatus.PAID ? 1 : 0,
+      );
+    });
+
+    it('confirms existing creation APIs are usable by an operation dashboard', async () => {
+      const concert = await createConcert(`${titlePrefix} Dashboard Create`);
+      const category = await createCategory(
+        concert.id,
+        `${titlePrefix} Dashboard Create GA`,
+        { price: 88.88, quantity: 50 },
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Dashboard Create Voucher`),
+        )
+      ).body as VoucherResponse;
+
+      expect(concert.status).toBe(ConcertStatus.DRAFT);
+      expect(category).toMatchObject({
+        concertId: concert.id,
+        price: '88.88',
+        sold: 0,
+      });
+      expect(voucher.code).toBe(
+        normalizeVoucherCode(`${titlePrefix} Dashboard Create Voucher`),
+      );
     });
   });
 
