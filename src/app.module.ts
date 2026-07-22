@@ -10,6 +10,7 @@ import { PrismaModule } from './common/prisma/prisma.module';
 import { ConcertsModule } from './concerts/concerts.module';
 import { TicketCategoriesModule } from './ticket-categories/ticket-categories.module';
 import { UsersModule } from './users/users.module';
+import { VouchersModule } from './vouchers/vouchers.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { UsersModule } from './users/users.module';
     ConcertsModule,
     TicketCategoriesModule,
     BookingsModule,
+    VouchersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

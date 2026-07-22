@@ -48,7 +48,7 @@ export class BookingsController {
   @ApiNotFoundResponse({ description: 'Concert or ticket category not found.' })
   @ApiConflictResponse({
     description:
-      'Concert/category is not bookable or not enough tickets remain.',
+      'Concert/category is not bookable, tickets are unavailable, or voucher cannot be applied.',
   })
   async create(
     @CurrentUser() user: AuthenticatedUser,

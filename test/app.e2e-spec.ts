@@ -6,8 +6,16 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { BookingStatus, ConcertStatus, Role } from '../generated/prisma/enums';
+import {
+  BookingStatus,
+  ConcertStatus,
+  Role,
+  VoucherDiscountType,
+  VoucherUsageStatus,
+} from '../generated/prisma/enums';
 import { AppModule } from '../src/app.module';
+
+jest.setTimeout(60000);
 
 type AuthResponse = {
   user: {
@@ -52,7 +60,13 @@ type BookingResponse = {
   concertId: string;
   concertTitle: string;
   status: BookingStatus;
+  subtotal: string;
+  discountAmount: string;
   totalAmount: string;
+  voucherCode: string | null;
+  voucherDiscountType: VoucherDiscountType | null;
+  voucherDiscountValue: string | null;
+  voucherMaximumDiscountAmount: string | null;
   items: {
     id: string;
     ticketCategoryId: string;
@@ -65,6 +79,49 @@ type BookingResponse = {
   updatedAt: string;
   passwordHash?: string;
   refreshTokenHash?: string;
+};
+
+type VoucherResponse = {
+  id: string;
+  code: string;
+  description: string | null;
+  discountType: VoucherDiscountType;
+  discountValue: string;
+  maximumDiscountAmount: string | null;
+  minimumOrderAmount: string | null;
+  startsAt: string;
+  expiresAt: string;
+  isActive: boolean;
+  usageLimit: number | null;
+  usedCount: number;
+  remainingQuantity: number | null;
+  perUserUsageLimit: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PaginatedVoucherResponse = {
+  data: VoucherResponse[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+};
+
+type VoucherValidationResponse = {
+  code: string;
+  discountType: VoucherDiscountType;
+  discountValue: string;
+  maximumDiscountAmount: string | null;
+  minimumOrderAmount: string | null;
+  subtotal: string;
+  discountAmount: string;
+  finalAmount: string;
+  remainingQuantity: number | null;
+  remainingUserUsage: number | null;
+  expiresAt: string;
 };
 
 type PaginatedConcertResponse = {
@@ -141,6 +198,7 @@ describe('Concert ticket booking API (e2e)', () => {
       connectionString: process.env.DATABASE_URL,
     });
 
+    await cleanupVouchers();
     await cleanupConcerts();
     await cleanupUsers();
     await insertUser(operatorEmail, Role.OPERATOR);
@@ -154,6 +212,7 @@ describe('Concert ticket booking API (e2e)', () => {
   });
 
   afterAll(async () => {
+    await cleanupVouchers();
     await cleanupConcerts();
     await cleanupUsers();
     await pool.end();
@@ -561,6 +620,377 @@ describe('Concert ticket booking API (e2e)', () => {
     });
   });
 
+  describe('voucher management and validation preview', () => {
+    it('protects operator voucher creation', async () => {
+      await request(app.getHttpServer()).post('/vouchers').send({}).expect(401);
+
+      await request(app.getHttpServer())
+        .post('/vouchers')
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send(buildVoucherPayload(`${titlePrefix} CUSTOMER BLOCKED`))
+        .expect(403);
+    });
+
+    it('allows operators to create percentage and fixed vouchers', async () => {
+      const percentageResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} percent create`, {
+          discountType: VoucherDiscountType.PERCENTAGE,
+          discountValue: '20.00',
+          maximumDiscountAmount: '30.00',
+        }),
+      );
+      const percentage = percentageResponse.body as VoucherResponse;
+
+      expect(percentage).toMatchObject({
+        code: normalizeVoucherCode(`${titlePrefix} percent create`),
+        discountType: VoucherDiscountType.PERCENTAGE,
+        discountValue: '20',
+        maximumDiscountAmount: '30',
+        usedCount: 0,
+        remainingQuantity: 5,
+      });
+
+      const fixedResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} fixed create`, {
+          discountType: VoucherDiscountType.FIXED_AMOUNT,
+          discountValue: '25.00',
+          maximumDiscountAmount: null,
+        }),
+      );
+      const fixed = fixedResponse.body as VoucherResponse;
+
+      expect(fixed).toMatchObject({
+        code: normalizeVoucherCode(`${titlePrefix} fixed create`),
+        discountType: VoucherDiscountType.FIXED_AMOUNT,
+        discountValue: '25',
+      });
+    });
+
+    it('normalizes codes and rejects duplicate normalized codes', async () => {
+      await createVoucher(buildVoucherPayload(` ${titlePrefix} Mixed Case `));
+
+      await createVoucher(
+        buildVoucherPayload(`${titlePrefix} mixed case`),
+      ).expect(409);
+    });
+
+    it('rejects invalid voucher configurations and protected fields', async () => {
+      await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Percent Too High`, {
+          discountValue: '101.00',
+        }),
+      ).expect(400);
+
+      await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Bad Dates`, {
+          startsAt: '2028-01-02T00:00:00.000Z',
+          expiresAt: '2028-01-01T00:00:00.000Z',
+        }),
+      ).expect(400);
+
+      await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Bad Limits`, {
+          usageLimit: 1,
+          perUserUsageLimit: 2,
+        }),
+      ).expect(400);
+
+      await createVoucher({
+        ...buildVoucherPayload(`${titlePrefix} Protected Field`),
+        usedCount: 1,
+      }).expect(400);
+    });
+
+    it('lists, reads, updates, deactivates, and deletes unused vouchers', async () => {
+      const createResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} CRUD Voucher`),
+      );
+      const created = createResponse.body as VoucherResponse;
+
+      const listResponse = await request(app.getHttpServer())
+        .get('/vouchers')
+        .query({ search: `${titlePrefix} CRUD`, page: 1, limit: 10 })
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      const list = listResponse.body as PaginatedVoucherResponse;
+
+      expect(list.data.map((voucher) => voucher.id)).toContain(created.id);
+
+      const detailResponse = await request(app.getHttpServer())
+        .get(`/vouchers/${created.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(200);
+      expect((detailResponse.body as VoucherResponse).id).toBe(created.id);
+
+      const updateResponse = await request(app.getHttpServer())
+        .patch(`/vouchers/${created.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ description: 'Updated voucher', isActive: false })
+        .expect(200);
+      const updated = updateResponse.body as VoucherResponse;
+
+      expect(updated.description).toBe('Updated voucher');
+      expect(updated.isActive).toBe(false);
+
+      await request(app.getHttpServer())
+        .delete(`/vouchers/${created.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(204);
+    });
+
+    it('validates updates against final merged configuration', async () => {
+      const createResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Merged Update`),
+      );
+      const voucher = createResponse.body as VoucherResponse;
+
+      await request(app.getHttpServer())
+        .patch(`/vouchers/${voucher.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ discountValue: '150.00' })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .patch(`/vouchers/${voucher.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ discountType: VoucherDiscountType.FIXED_AMOUNT })
+        .expect(400);
+    });
+
+    it('rejects deleting vouchers with usage history', async () => {
+      const voucherResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Delete History`),
+      );
+      const voucher = voucherResponse.body as VoucherResponse;
+      const bookingFixture = await createPublishedBookingFixture(
+        `${titlePrefix} Voucher Usage Booking`,
+        2,
+      );
+      const bookingResponse = await createBooking(
+        bookingFixture.concert.id,
+        bookingFixture.category.id,
+        1,
+      );
+      const booking = bookingResponse.body as BookingResponse;
+
+      await insertVoucherUsage(voucher.id, customer.user.id, booking.id);
+
+      await request(app.getHttpServer())
+        .delete(`/vouchers/${voucher.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(409);
+    });
+
+    it('protects customer voucher validation preview', async () => {
+      await request(app.getHttpServer())
+        .post('/vouchers/validate')
+        .send({})
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/vouchers/validate')
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send(buildValidatePayload(`${titlePrefix} ANY`))
+        .expect(403);
+    });
+
+    it('validates active vouchers without mutating counters or inventory', async () => {
+      const voucherResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Preview Active`, {
+          discountValue: '20.00',
+          usageLimit: 5,
+          perUserUsageLimit: 2,
+        }),
+      );
+      const voucher = voucherResponse.body as VoucherResponse;
+      const before = await readVoucherMutationState(
+        voucher.id,
+        publishedConcert.id,
+        publishedCategory.id,
+      );
+
+      const response = await validateVoucher(voucher.code, [
+        { ticketCategoryId: publishedCategory.id, quantity: 2 },
+      ]);
+      const body = response.body as VoucherValidationResponse;
+
+      expect(body).toMatchObject({
+        code: voucher.code,
+        discountType: VoucherDiscountType.PERCENTAGE,
+        subtotal: '99.98',
+        discountAmount: '20',
+        finalAmount: '79.98',
+        remainingQuantity: 5,
+        remainingUserUsage: 2,
+      });
+
+      await expectVoucherMutationState(
+        voucher.id,
+        publishedConcert.id,
+        publishedCategory.id,
+        before,
+      );
+    });
+
+    it('rejects client-calculated totals and item unit prices', async () => {
+      const voucherResponse = await createVoucher(
+        buildVoucherPayload(`${titlePrefix} Preview Protected`),
+      );
+      const voucher = voucherResponse.body as VoucherResponse;
+
+      await request(app.getHttpServer())
+        .post('/vouchers/validate')
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({
+          ...buildValidatePayload(voucher.code),
+          subtotal: '1.00',
+        })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .post('/vouchers/validate')
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({
+          code: voucher.code,
+          concertId: publishedConcert.id,
+          items: [
+            {
+              ticketCategoryId: publishedCategory.id,
+              quantity: 1,
+              unitPrice: '1.00',
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it('rejects inactive, future, expired, and exhausted vouchers', async () => {
+      const inactive = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Inactive`, {
+            isActive: false,
+          }),
+        )
+      ).body as VoucherResponse;
+      const future = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Future`, {
+            startsAt: '2035-01-01T00:00:00.000Z',
+            expiresAt: '2035-12-31T00:00:00.000Z',
+          }),
+        )
+      ).body as VoucherResponse;
+      const expired = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Expired`, {
+            startsAt: '2026-01-01T00:00:00.000Z',
+            expiresAt: '2026-01-02T00:00:00.000Z',
+          }),
+        )
+      ).body as VoucherResponse;
+      const exhausted = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Exhausted`, {
+            usageLimit: 1,
+            perUserUsageLimit: 1,
+          }),
+        )
+      ).body as VoucherResponse;
+
+      await pool.query('UPDATE "Voucher" SET "usedCount" = 1 WHERE id = $1', [
+        exhausted.id,
+      ]);
+
+      await validateVoucher(inactive.code).expect(409);
+      await validateVoucher(future.code).expect(409);
+      await validateVoucher(expired.code).expect(409);
+      await validateVoucher(exhausted.code).expect(409);
+    });
+
+    it('rejects per-user exhaustion and minimum order failures', async () => {
+      const perUser = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Per User`, {
+            perUserUsageLimit: 1,
+          }),
+        )
+      ).body as VoucherResponse;
+      const minimumOrder = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Minimum`, {
+            minimumOrderAmount: '1000.00',
+          }),
+        )
+      ).body as VoucherResponse;
+
+      await insertVoucherUserUsage(perUser.id, customer.user.id, 1);
+
+      await validateVoucher(perUser.code).expect(409);
+      await validateVoucher(minimumOrder.code).expect(400);
+    });
+
+    it('applies maximum percentage caps and fixed discount floors', async () => {
+      const capped = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Cap`, {
+            discountValue: '50.00',
+            maximumDiscountAmount: '10.00',
+          }),
+        )
+      ).body as VoucherResponse;
+      const fixed = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} Preview Fixed Floor`, {
+            discountType: VoucherDiscountType.FIXED_AMOUNT,
+            discountValue: '500.00',
+            maximumDiscountAmount: null,
+          }),
+        )
+      ).body as VoucherResponse;
+
+      await validateVoucher(capped.code)
+        .expect(200)
+        .expect((response) => {
+          const body = response.body as VoucherValidationResponse;
+
+          expect(body.discountAmount).toBe('10');
+          expect(body.finalAmount).toBe('39.99');
+        });
+
+      await validateVoucher(fixed.code)
+        .expect(200)
+        .expect((response) => {
+          const body = response.body as VoucherValidationResponse;
+
+          expect(body.discountAmount).toBe('49.99');
+          expect(body.finalAmount).toBe('0');
+        });
+    });
+
+    it('rejects invalid validation items', async () => {
+      const voucher = (
+        await createVoucher(buildVoucherPayload(`${titlePrefix} Preview Items`))
+      ).body as VoucherResponse;
+      const other = await createPublishedBookingFixture(
+        `${titlePrefix} Preview Other Concert`,
+        5,
+      );
+
+      await validateVoucher(voucher.code, [
+        { ticketCategoryId: publishedCategory.id, quantity: 1 },
+        { ticketCategoryId: publishedCategory.id, quantity: 1 },
+      ]).expect(400);
+
+      await validateVoucher(voucher.code, [
+        { ticketCategoryId: other.category.id, quantity: 1 },
+      ]).expect(404);
+
+      await validateVoucher(voucher.code, [
+        { ticketCategoryId: inactivePublishedCategory.id, quantity: 1 },
+      ]).expect(409);
+    });
+  });
+
   describe('booking workflow', () => {
     it('rejects unauthenticated and operator booking creation', async () => {
       await request(app.getHttpServer()).post('/bookings').send({}).expect(401);
@@ -589,7 +1019,10 @@ describe('Concert ticket booking API (e2e)', () => {
         userId: customer.user.id,
         concertId: concert.id,
         status: BookingStatus.PENDING,
+        subtotal: '99.98',
+        discountAmount: '0',
         totalAmount: '99.98',
+        voucherCode: null,
       });
       expect(booking.items).toEqual([
         expect.objectContaining({
@@ -602,6 +1035,7 @@ describe('Concert ticket booking API (e2e)', () => {
       expect(booking.passwordHash).toBeUndefined();
       expect(booking.refreshTokenHash).toBeUndefined();
       await expectCategorySold(category.id, 2);
+      await expectBookingUsageCount(booking.id, 0);
 
       const detailResponse = await request(app.getHttpServer())
         .get(`/bookings/${booking.id}`)
@@ -739,6 +1173,392 @@ describe('Concert ticket booking API (e2e)', () => {
         .post(`/bookings/${booking.id}/cancel`)
         .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
         .expect(409);
+    });
+
+    it('applies a percentage voucher and stores booking snapshots', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Percent`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING PERCENT`, {
+            discountValue: '20.00',
+            maximumDiscountAmount: null,
+            usageLimit: 5,
+            perUserUsageLimit: 2,
+          }),
+        )
+      ).body as VoucherResponse;
+
+      const response = await createBooking(
+        concert.id,
+        category.id,
+        2,
+        customer.tokens.accessToken,
+        ` ${voucher.code.toLowerCase()} `,
+      );
+      const booking = response.body as BookingResponse;
+
+      expect(booking).toMatchObject({
+        subtotal: '99.98',
+        discountAmount: '20',
+        totalAmount: '79.98',
+        voucherCode: voucher.code,
+        voucherDiscountType: VoucherDiscountType.PERCENTAGE,
+        voucherDiscountValue: '20',
+        voucherMaximumDiscountAmount: null,
+      });
+      await expectCategorySold(category.id, 2);
+      await expectVoucherState(voucher.id, customer.user.id, {
+        usedCount: 1,
+        activeUsageCount: 1,
+        releasedUsageCount: 0,
+        userUsedCount: 1,
+      });
+      await expectBookingUsageCount(booking.id, 1);
+    });
+
+    it('applies capped percentage and fixed vouchers without negative totals', async () => {
+      const cappedFixture = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Cap`,
+        5,
+      );
+      const capped = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING CAP`, {
+            discountValue: '50.00',
+            maximumDiscountAmount: '10.00',
+          }),
+        )
+      ).body as VoucherResponse;
+      const cappedBooking = (
+        await createBooking(
+          cappedFixture.concert.id,
+          cappedFixture.category.id,
+          1,
+          customer.tokens.accessToken,
+          capped.code,
+        )
+      ).body as BookingResponse;
+
+      expect(cappedBooking.discountAmount).toBe('10');
+      expect(cappedBooking.totalAmount).toBe('39.99');
+
+      const fixedFixture = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Fixed`,
+        5,
+      );
+      const fixed = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING FIXED`, {
+            discountType: VoucherDiscountType.FIXED_AMOUNT,
+            discountValue: '500.00',
+            maximumDiscountAmount: null,
+          }),
+        )
+      ).body as VoucherResponse;
+      const fixedBooking = (
+        await createBooking(
+          fixedFixture.concert.id,
+          fixedFixture.category.id,
+          1,
+          customer.tokens.accessToken,
+          fixed.code,
+        )
+      ).body as BookingResponse;
+
+      expect(fixedBooking.discountAmount).toBe('49.99');
+      expect(fixedBooking.totalAmount).toBe('0');
+    });
+
+    it('keeps voucher booking snapshots stable after category and voucher changes', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Snapshot`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING SNAPSHOT`, {
+            discountValue: '25.00',
+            maximumDiscountAmount: null,
+          }),
+        )
+      ).body as VoucherResponse;
+      const booking = (
+        await createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        )
+      ).body as BookingResponse;
+
+      await pool.query('UPDATE "TicketCategory" SET price = $1 WHERE id = $2', [
+        '199.99',
+        category.id,
+      ]);
+      await request(app.getHttpServer())
+        .patch(`/vouchers/${voucher.id}`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ discountValue: '5.00', isActive: false })
+        .expect(200);
+
+      const detail = (
+        await request(app.getHttpServer())
+          .get(`/bookings/${booking.id}`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .expect(200)
+      ).body as BookingResponse;
+
+      expect(detail.subtotal).toBe('49.99');
+      expect(detail.discountAmount).toBe('12.5');
+      expect(detail.totalAmount).toBe('37.49');
+      expect(detail.voucherDiscountValue).toBe('25');
+    });
+
+    it('rolls back voucher effects when voucher or ticket validation fails', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Rollback`,
+        1,
+      );
+      const expired = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING EXPIRED`, {
+            startsAt: '2026-01-01T00:00:00.000Z',
+            expiresAt: '2026-01-02T00:00:00.000Z',
+          }),
+        )
+      ).body as VoucherResponse;
+      const valid = (
+        await createVoucher(buildVoucherPayload(`${titlePrefix} BOOKING STOCK`))
+      ).body as VoucherResponse;
+
+      await createBooking(
+        concert.id,
+        category.id,
+        1,
+        customer.tokens.accessToken,
+        expired.code,
+      ).expect(409);
+      await expectCategorySold(category.id, 0);
+      await expectVoucherState(expired.id, customer.user.id, {
+        usedCount: 0,
+        activeUsageCount: 0,
+        releasedUsageCount: 0,
+        userUsedCount: 0,
+      });
+
+      await createBooking(
+        concert.id,
+        category.id,
+        2,
+        customer.tokens.accessToken,
+        valid.code,
+      ).expect(409);
+      await expectCategorySold(category.id, 0);
+      await expectVoucherState(valid.id, customer.user.id, {
+        usedCount: 0,
+        activeUsageCount: 0,
+        releasedUsageCount: 0,
+        userUsedCount: 0,
+      });
+      await expectBookingCount(concert.id, 0);
+    });
+
+    it('prevents concurrent global voucher overuse', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Global Race`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING GLOBAL RACE`, {
+            usageLimit: 1,
+            perUserUsageLimit: 1,
+          }),
+        )
+      ).body as VoucherResponse;
+
+      const responses = await Promise.all([
+        createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        ),
+        createBooking(
+          concert.id,
+          category.id,
+          1,
+          otherCustomer.tokens.accessToken,
+          voucher.code,
+        ),
+      ]);
+      const statuses = responses.map((response) => response.status);
+
+      expect(statuses.filter((status) => status === 201)).toHaveLength(1);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectCategorySold(category.id, 1);
+      await expectVoucherAppliedInvariant(voucher.id);
+    });
+
+    it('prevents concurrent per-user voucher overuse', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher User Race`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING USER RACE`, {
+            usageLimit: 3,
+            perUserUsageLimit: 2,
+          }),
+        )
+      ).body as VoucherResponse;
+
+      const responses = await Promise.all([
+        createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        ),
+        createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        ),
+        createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        ),
+      ]);
+      const statuses = responses.map((response) => response.status);
+
+      expect(statuses.filter((status) => status === 201)).toHaveLength(2);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectCategorySold(category.id, 2);
+      await expectVoucherState(voucher.id, customer.user.id, {
+        usedCount: 2,
+        activeUsageCount: 2,
+        releasedUsageCount: 0,
+        userUsedCount: 2,
+      });
+    });
+
+    it('releases voucher usage exactly once on pending cancellation', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Cancel`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING CANCEL`, {
+            usageLimit: 1,
+            perUserUsageLimit: 1,
+          }),
+        )
+      ).body as VoucherResponse;
+      const booking = (
+        await createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        )
+      ).body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(200);
+      await expectCategorySold(category.id, 0);
+      await expectVoucherState(voucher.id, customer.user.id, {
+        usedCount: 0,
+        activeUsageCount: 0,
+        releasedUsageCount: 1,
+        userUsedCount: 0,
+      });
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(409);
+
+      await createBooking(
+        concert.id,
+        category.id,
+        1,
+        customer.tokens.accessToken,
+        voucher.code,
+      ).expect(201);
+    });
+
+    it('keeps voucher consumed after payment and handles pay-vs-cancel race', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Voucher Pay Race`,
+        5,
+      );
+      const voucher = (
+        await createVoucher(
+          buildVoucherPayload(`${titlePrefix} BOOKING PAY RACE`),
+        )
+      ).body as VoucherResponse;
+      const booking = (
+        await createBooking(
+          concert.id,
+          category.id,
+          1,
+          customer.tokens.accessToken,
+          voucher.code,
+        )
+      ).body as BookingResponse;
+
+      const responses = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/pay`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({ success: true }),
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/cancel`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`),
+      ]);
+      const statuses = responses.map((response) => response.status);
+      const finalStatus = await getBookingStatus(booking.id);
+
+      expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      expect([BookingStatus.PAID, BookingStatus.CANCELLED]).toContain(
+        finalStatus,
+      );
+
+      if (finalStatus === BookingStatus.PAID) {
+        await expectCategorySold(category.id, 1);
+        await expectVoucherState(voucher.id, customer.user.id, {
+          usedCount: 1,
+          activeUsageCount: 1,
+          releasedUsageCount: 0,
+          userUsedCount: 1,
+        });
+      } else {
+        await expectCategorySold(category.id, 0);
+        await expectVoucherState(voucher.id, customer.user.id, {
+          usedCount: 0,
+          activeUsageCount: 0,
+          releasedUsageCount: 1,
+          userUsedCount: 0,
+        });
+      }
     });
 
     it('rejects invalid payment payloads and protects ownership', async () => {
@@ -1068,11 +1888,90 @@ describe('Concert ticket booking API (e2e)', () => {
     ticketCategoryId: string,
     quantity: number,
     accessToken = customer.tokens.accessToken,
+    voucherCode?: string,
   ): request.Test {
     return request(app.getHttpServer())
       .post('/bookings')
       .set('Authorization', `Bearer ${accessToken}`)
-      .send({ concertId, ticketCategoryId, quantity });
+      .send({
+        concertId,
+        ticketCategoryId,
+        quantity,
+        ...(voucherCode ? { voucherCode } : {}),
+      });
+  }
+
+  function buildVoucherPayload(
+    code: string,
+    overrides: Partial<{
+      description: string | null;
+      discountType: VoucherDiscountType;
+      discountValue: string;
+      maximumDiscountAmount: string | null;
+      minimumOrderAmount: string | null;
+      startsAt: string;
+      expiresAt: string;
+      isActive: boolean;
+      usageLimit: number | null;
+      perUserUsageLimit: number | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      code,
+      description: overrides.description ?? 'E2E voucher fixture',
+      discountType: overrides.discountType ?? VoucherDiscountType.PERCENTAGE,
+      discountValue: overrides.discountValue ?? '10.00',
+      maximumDiscountAmount:
+        overrides.maximumDiscountAmount === undefined
+          ? '50.00'
+          : overrides.maximumDiscountAmount,
+      minimumOrderAmount:
+        overrides.minimumOrderAmount === undefined
+          ? '0.00'
+          : overrides.minimumOrderAmount,
+      startsAt: overrides.startsAt ?? '2026-07-01T00:00:00.000Z',
+      expiresAt: overrides.expiresAt ?? '2028-12-31T23:59:59.999Z',
+      isActive: overrides.isActive ?? true,
+      usageLimit: overrides.usageLimit === undefined ? 5 : overrides.usageLimit,
+      perUserUsageLimit:
+        overrides.perUserUsageLimit === undefined
+          ? 2
+          : overrides.perUserUsageLimit,
+    };
+  }
+
+  function createVoucher(payload: Record<string, unknown>): request.Test {
+    return request(app.getHttpServer())
+      .post('/vouchers')
+      .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+      .send(payload);
+  }
+
+  function buildValidatePayload(
+    code: string,
+    items: { ticketCategoryId: string; quantity: number }[] = [
+      { ticketCategoryId: publishedCategory.id, quantity: 1 },
+    ],
+  ): Record<string, unknown> {
+    return {
+      code,
+      concertId: publishedConcert.id,
+      items,
+    };
+  }
+
+  function validateVoucher(
+    code: string,
+    items?: { ticketCategoryId: string; quantity: number }[],
+  ): request.Test {
+    return request(app.getHttpServer())
+      .post('/vouchers/validate')
+      .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+      .send(buildValidatePayload(code, items));
+  }
+
+  function normalizeVoucherCode(code: string): string {
+    return code.trim().toUpperCase();
   }
 
   async function login(email: string): Promise<AuthResponse> {
@@ -1165,6 +2064,147 @@ describe('Concert ticket booking API (e2e)', () => {
     await expect(getBookingStatus(bookingId)).resolves.toBe(status);
   }
 
+  async function expectBookingUsageCount(
+    bookingId: string,
+    count: number,
+  ): Promise<void> {
+    const result = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM "VoucherUsage" WHERE "bookingId" = $1',
+      [bookingId],
+    );
+
+    expect(Number(result.rows[0]?.count)).toBe(count);
+  }
+
+  async function expectVoucherState(
+    voucherId: string,
+    userId: string,
+    expected: {
+      usedCount: number;
+      activeUsageCount: number;
+      releasedUsageCount: number;
+      userUsedCount: number;
+    },
+  ): Promise<void> {
+    const voucher = await pool.query<{ usedCount: number }>(
+      'SELECT "usedCount" FROM "Voucher" WHERE id = $1',
+      [voucherId],
+    );
+    const usages = await pool.query<{
+      active: string;
+      released: string;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'APPLIED')::text AS active,
+         COUNT(*) FILTER (WHERE status = 'RELEASED')::text AS released
+       FROM "VoucherUsage"
+       WHERE "voucherId" = $1`,
+      [voucherId],
+    );
+    const counter = await pool.query<{ usedCount: number }>(
+      `SELECT "usedCount" FROM "VoucherUserUsage"
+       WHERE "voucherId" = $1 AND "userId" = $2`,
+      [voucherId, userId],
+    );
+
+    expect(voucher.rows[0]?.usedCount).toBe(expected.usedCount);
+    expect(Number(usages.rows[0]?.active)).toBe(expected.activeUsageCount);
+    expect(Number(usages.rows[0]?.released)).toBe(expected.releasedUsageCount);
+    expect(counter.rows[0]?.usedCount ?? 0).toBe(expected.userUsedCount);
+  }
+
+  async function expectVoucherAppliedInvariant(
+    voucherId: string,
+  ): Promise<void> {
+    const voucher = await pool.query<{ usedCount: number }>(
+      'SELECT "usedCount" FROM "Voucher" WHERE id = $1',
+      [voucherId],
+    );
+    const usages = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM "VoucherUsage"
+       WHERE "voucherId" = $1 AND status = 'APPLIED'`,
+      [voucherId],
+    );
+
+    expect(voucher.rows[0]?.usedCount).toBe(Number(usages.rows[0]?.count));
+  }
+
+  async function insertVoucherUsage(
+    voucherId: string,
+    userId: string,
+    bookingId: string,
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO "VoucherUsage" ("id", "voucherId", "userId", "bookingId", "status", "createdAt")
+       VALUES ($1, $2, $3, $4, $5::"VoucherUsageStatus", now())`,
+      [randomUUID(), voucherId, userId, bookingId, VoucherUsageStatus.APPLIED],
+    );
+  }
+
+  async function insertVoucherUserUsage(
+    voucherId: string,
+    userId: string,
+    usedCount: number,
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO "VoucherUserUsage" ("id", "voucherId", "userId", "usedCount", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, now(), now())`,
+      [randomUUID(), voucherId, userId, usedCount],
+    );
+  }
+
+  async function readVoucherMutationState(
+    voucherId: string,
+    concertId: string,
+    categoryId: string,
+  ): Promise<{
+    usedCount: number;
+    usageCount: number;
+    userCounterCount: number;
+    sold: number;
+    bookingCount: number;
+  }> {
+    const voucher = await pool.query<{ usedCount: number }>(
+      'SELECT "usedCount" FROM "Voucher" WHERE id = $1',
+      [voucherId],
+    );
+    const usages = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM "VoucherUsage" WHERE "voucherId" = $1',
+      [voucherId],
+    );
+    const counters = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM "VoucherUserUsage" WHERE "voucherId" = $1',
+      [voucherId],
+    );
+    const category = await pool.query<{ sold: number }>(
+      'SELECT sold FROM "TicketCategory" WHERE id = $1',
+      [categoryId],
+    );
+    const bookings = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM "Booking" WHERE "concertId" = $1',
+      [concertId],
+    );
+
+    return {
+      usedCount: voucher.rows[0].usedCount,
+      usageCount: Number(usages.rows[0].count),
+      userCounterCount: Number(counters.rows[0].count),
+      sold: category.rows[0].sold,
+      bookingCount: Number(bookings.rows[0].count),
+    };
+  }
+
+  async function expectVoucherMutationState(
+    voucherId: string,
+    concertId: string,
+    categoryId: string,
+    expected: Awaited<ReturnType<typeof readVoucherMutationState>>,
+  ): Promise<void> {
+    await expect(
+      readVoucherMutationState(voucherId, concertId, categoryId),
+    ).resolves.toEqual(expected);
+  }
+
   async function cleanupUsers(): Promise<void> {
     for (const email of [
       authCustomerEmail,
@@ -1184,6 +2224,30 @@ describe('Concert ticket booking API (e2e)', () => {
     );
     await pool.query('DELETE FROM "Concert" WHERE title LIKE $1', [
       `${titlePrefix}%`,
+    ]);
+  }
+
+  async function cleanupVouchers(): Promise<void> {
+    await pool.query(
+      'DELETE FROM "VoucherUsage" WHERE "voucherId" IN (SELECT id FROM "Voucher" WHERE code LIKE $1)',
+      [`%${runId}%`],
+    );
+    await pool.query(
+      'DELETE FROM "VoucherUserUsage" WHERE "voucherId" IN (SELECT id FROM "Voucher" WHERE code LIKE $1)',
+      [`%${runId}%`],
+    );
+    await pool.query(
+      `UPDATE "Booking"
+       SET "voucherId" = NULL,
+           "voucherCodeSnapshot" = NULL,
+           "voucherDiscountTypeSnapshot" = NULL,
+           "voucherDiscountValueSnapshot" = NULL,
+           "voucherMaximumDiscountAmountSnapshot" = NULL
+       WHERE "voucherId" IN (SELECT id FROM "Voucher" WHERE code LIKE $1)`,
+      [`%${runId}%`],
+    );
+    await pool.query('DELETE FROM "Voucher" WHERE code LIKE $1', [
+      `%${runId}%`,
     ]);
   }
 });

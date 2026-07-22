@@ -1,5 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { BookingStatus } from '../../../generated/prisma/enums';
+import {
+  BookingStatus,
+  VoucherDiscountType,
+} from '../../../generated/prisma/enums';
 
 export class BookingItemResponseDto {
   @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000' })
@@ -38,7 +41,29 @@ export class BookingResponseDto {
   status: BookingStatus;
 
   @ApiProperty({ example: '99.98' })
+  subtotal: string;
+
+  @ApiProperty({ example: '0' })
+  discountAmount: string;
+
+  @ApiProperty({ example: '99.98' })
   totalAmount: string;
+
+  @ApiProperty({ example: 'SUMMER20', required: false, nullable: true })
+  voucherCode: string | null;
+
+  @ApiProperty({
+    enum: VoucherDiscountType,
+    required: false,
+    nullable: true,
+  })
+  voucherDiscountType: VoucherDiscountType | null;
+
+  @ApiProperty({ example: '20', required: false, nullable: true })
+  voucherDiscountValue: string | null;
+
+  @ApiProperty({ example: '50', required: false, nullable: true })
+  voucherMaximumDiscountAmount: string | null;
 
   @ApiProperty({ type: BookingItemResponseDto, isArray: true })
   items: BookingItemResponseDto[];

@@ -1,7 +1,12 @@
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import * as bcrypt from 'bcryptjs';
-import { ConcertStatus, PrismaClient, Role } from '../generated/prisma/client';
+import {
+  ConcertStatus,
+  PrismaClient,
+  Role,
+  VoucherDiscountType,
+} from '../generated/prisma/client';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -26,6 +31,13 @@ const seedOperatorFullName = operatorFullName;
 const demoPublishedTitle = 'Demo Published Future Concert';
 const demoDraftTitle = 'Demo Draft Concert';
 const demoEndedTitle = 'Demo Ended Published Concert';
+
+const activeVoucherStartsAt = new Date('2026-01-01T00:00:00.000Z');
+const activeVoucherExpiresAt = new Date('2035-12-31T23:59:59.999Z');
+const expiredVoucherStartsAt = new Date('2025-01-01T00:00:00.000Z');
+const expiredVoucherExpiresAt = new Date('2025-12-31T23:59:59.999Z');
+const futureVoucherStartsAt = new Date('2036-01-01T00:00:00.000Z');
+const futureVoucherExpiresAt = new Date('2036-12-31T23:59:59.999Z');
 
 async function main(): Promise<void> {
   const adapter = new PrismaPg({ connectionString });
@@ -64,6 +76,7 @@ async function main(): Promise<void> {
     }
 
     await seedDemoConcerts(prisma, operator.id);
+    await seedDemoVouchers(prisma);
   } finally {
     await prisma.$disconnect();
   }
@@ -91,21 +104,18 @@ async function seedDemoConcerts(
     description: 'Seeded active general admission category.',
     price: 49.99,
     quantity: 500,
-    sold: 0,
     isActive: true,
   });
   await upsertTicketCategory(prisma, publishedConcert.id, 'VIP', {
     description: 'Seeded active VIP category.',
     price: 129.99,
     quantity: 100,
-    sold: 0,
     isActive: true,
   });
   await upsertTicketCategory(prisma, publishedConcert.id, 'Archived Early Bird', {
     description: 'Seeded inactive category hidden from public details.',
     price: 29.99,
     quantity: 50,
-    sold: 0,
     isActive: false,
   });
 
@@ -127,7 +137,6 @@ async function seedDemoConcerts(
     description: 'Seeded draft concert ticket category.',
     price: 39.99,
     quantity: 300,
-    sold: 0,
     isActive: true,
   });
 
@@ -149,8 +158,127 @@ async function seedDemoConcerts(
     description: 'Seeded ended concert ticket category.',
     price: 19.99,
     quantity: 200,
-    sold: 0,
     isActive: true,
+  });
+}
+
+async function seedDemoVouchers(prisma: PrismaClient): Promise<void> {
+  await upsertVoucherByCode(prisma, {
+    code: 'SAVE10',
+    description: 'Demo active 10% percentage voucher.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'LESS50000',
+    description: 'Demo active fixed 50,000 discount voucher.',
+    discountType: VoucherDiscountType.FIXED_AMOUNT,
+    discountValue: '50000.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'SAVE20MAX100K',
+    description: 'Demo active 20% voucher capped at 100,000.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '20.00',
+    maximumDiscountAmount: '100000.00',
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'MIN300K',
+    description: 'Demo voucher requiring a minimum subtotal of 300,000.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '15.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: '300000.00',
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'LIMITED2',
+    description: 'Demo voucher with two total active usages.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: 2,
+    perUserUsageLimit: 1,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'ONCEPERUSER',
+    description: 'Demo voucher limited to one active usage per customer.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: true,
+    usageLimit: 100,
+    perUserUsageLimit: 1,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'INACTIVE10',
+    description: 'Demo inactive 10% voucher.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: activeVoucherStartsAt,
+    expiresAt: activeVoucherExpiresAt,
+    isActive: false,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'EXPIRED10',
+    description: 'Demo expired 10% voucher.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: expiredVoucherStartsAt,
+    expiresAt: expiredVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
+  });
+  await upsertVoucherByCode(prisma, {
+    code: 'FUTURE10',
+    description: 'Demo scheduled 10% voucher.',
+    discountType: VoucherDiscountType.PERCENTAGE,
+    discountValue: '10.00',
+    maximumDiscountAmount: null,
+    minimumOrderAmount: null,
+    startsAt: futureVoucherStartsAt,
+    expiresAt: futureVoucherExpiresAt,
+    isActive: true,
+    usageLimit: null,
+    perUserUsageLimit: 5,
   });
 }
 
@@ -201,7 +329,6 @@ async function upsertTicketCategory(
     description: string;
     price: number;
     quantity: number;
-    sold: number;
     isActive: boolean;
   },
 ): Promise<void> {
@@ -215,10 +342,70 @@ async function upsertTicketCategory(
     create: {
       concertId,
       name,
+      sold: 0,
       ...data,
     },
     update: data,
   });
+}
+
+async function upsertVoucherByCode(
+  prisma: PrismaClient,
+  data: {
+    code: string;
+    description: string;
+    discountType: VoucherDiscountType;
+    discountValue: string;
+    maximumDiscountAmount: string | null;
+    minimumOrderAmount: string | null;
+    startsAt: Date;
+    expiresAt: Date;
+    isActive: boolean;
+    usageLimit: number | null;
+    perUserUsageLimit: number | null;
+  },
+): Promise<void> {
+  const code = normalizeVoucherCode(data.code);
+  const existing = await prisma.voucher.findUnique({
+    where: { code },
+    select: { id: true, usedCount: true, usageLimit: true },
+  });
+
+  if (!existing) {
+    await prisma.voucher.create({
+      data: {
+        ...data,
+        code,
+      },
+    });
+
+    return;
+  }
+
+  const safeUsageLimit =
+    data.usageLimit === null || data.usageLimit >= existing.usedCount
+      ? data.usageLimit
+      : existing.usageLimit;
+
+  await prisma.voucher.update({
+    where: { id: existing.id },
+    data: {
+      description: data.description,
+      discountType: data.discountType,
+      discountValue: data.discountValue,
+      maximumDiscountAmount: data.maximumDiscountAmount,
+      minimumOrderAmount: data.minimumOrderAmount,
+      startsAt: data.startsAt,
+      expiresAt: data.expiresAt,
+      isActive: data.isActive,
+      usageLimit: safeUsageLimit,
+      perUserUsageLimit: data.perUserUsageLimit,
+    },
+  });
+}
+
+function normalizeVoucherCode(code: string): string {
+  return code.trim().toUpperCase();
 }
 
 void main();
