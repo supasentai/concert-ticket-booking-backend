@@ -1,98 +1,127 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Concert Ticket Booking Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS backend for the Concert Ticket Booking home-test project.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Requirements
 
-## Description
+- Node.js 22+
+- npm
+- Docker and Docker Compose
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Environment
 
-## Project setup
+Create a local `.env` from the example:
 
 ```bash
-$ npm install
+cp .env.example .env
 ```
 
-## Compile and run the project
+The example uses placeholder PostgreSQL credentials and authentication secrets. Update `.env` for your local machine if needed. Do not commit `.env`.
+
+Required authentication variables:
+
+```env
+JWT_ACCESS_SECRET=replace-with-a-secure-access-secret
+JWT_ACCESS_EXPIRES_IN=15m
+JWT_REFRESH_SECRET=replace-with-a-secure-refresh-secret
+JWT_REFRESH_EXPIRES_IN=7d
+
+SEED_OPERATOR_EMAIL=operator@example.com
+SEED_OPERATOR_PASSWORD=replace-with-a-secure-password
+SEED_OPERATOR_FULL_NAME=System Operator
+```
+
+## Local Setup
+
+Start PostgreSQL:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+docker compose up -d
 ```
 
-## Run tests
+Install dependencies:
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm ci
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Generate Prisma Client and apply migrations:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npx prisma generate
+npx prisma migrate deploy
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Create or update the seeded operator account:
 
-## Resources
+```bash
+npx prisma db seed
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Start the API:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+npm run start:dev
+```
 
-## Support
+The API listens on the configured `PORT` value, defaulting to `3000`.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Useful URLs
 
-## Stay in touch
+- Health check: `http://localhost:3000/health`
+- Swagger: `http://localhost:3000/api/docs`
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+## Authentication
 
-## License
+Public endpoints:
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- `POST /auth/register` creates a `CUSTOMER` account. The request body does not accept a role.
+- `POST /auth/login` returns an access token and refresh token.
+- `POST /auth/refresh` rotates a valid refresh token and invalidates the previous refresh token.
+
+Authenticated endpoints:
+
+- `POST /auth/logout` invalidates the current user's refresh token.
+- `GET /users/me` returns the authenticated user.
+- `GET /users` lists users and requires the `OPERATOR` role.
+
+Use the access token as a bearer token:
+
+```http
+Authorization: Bearer <access-token>
+```
+
+Roles:
+
+- `CUSTOMER`: default role for public registration.
+- `OPERATOR`: seeded administrative role for operator-only APIs.
+
+Refresh tokens are stored as hashes and rotated on every refresh. Reusing an old refresh token returns `401 Unauthorized`.
+
+## Verification
+
+```bash
+npx prisma validate
+npx prisma migrate status
+npm run format:check
+npm run lint:check
+npm test -- --runInBand
+npm run test:e2e
+npm run build
+```
+
+Run the production build locally:
+
+```bash
+npm run start:prod
+```
+
+## Docker
+
+Build the application image:
+
+```bash
+docker build -t concert-ticket-booking-backend .
+```
+
+When running the image manually, pass a `DATABASE_URL` that is reachable from inside the container. If using the Compose network, use the PostgreSQL service name `postgres` as the host.
