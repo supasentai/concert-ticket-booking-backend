@@ -139,6 +139,18 @@ Local demonstration flow:
 
 Swagger is available at `http://localhost:3000/api/docs`. Apply migrations with `npx prisma migrate deploy` for a local database that should not create new development migrations.
 
+## Phase 03: Booking Workflow
+
+Customer booking APIs require a bearer token for a `CUSTOMER` account:
+
+- `POST /bookings`
+- `GET /bookings/me`
+- `GET /bookings/:id`
+- `POST /bookings/:id/pay`
+- `POST /bookings/:id/cancel`
+
+Creating a booking reserves tickets atomically and creates a `PENDING` booking. Mock payment with `{ "success": true }` changes a pending booking to `PAID`; mock payment with `{ "success": false }` changes it to `CANCELLED` and restores the reserved tickets. Repeated payment or cancellation attempts return `409 Conflict`.
+
 ## Verification
 
 ```bash

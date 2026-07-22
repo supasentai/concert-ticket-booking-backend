@@ -24,6 +24,12 @@ enum ConcertStatus {
   CANCELLED
 }
 
+enum BookingStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
 model HealthRecord {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
@@ -39,6 +45,7 @@ model User {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   createdConcerts  Concert[]
+  bookings         Booking[]
 
   @@index([role])
 }
@@ -59,6 +66,7 @@ model Concert {
   createdById      String?
   createdBy        User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
   ticketCategories TicketCategory[]
+  bookings         Booking[]
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -68,19 +76,53 @@ model Concert {
 }
 
 model TicketCategory {
-  id          String   @id @default(uuid())
-  concertId   String
-  concert     Concert  @relation(fields: [concertId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  price       Decimal  @db.Decimal(12, 2)
-  quantity    Int
-  sold        Int      @default(0)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String        @id @default(uuid())
+  concertId    String
+  concert      Concert       @relation(fields: [concertId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  price        Decimal       @db.Decimal(12, 2)
+  quantity     Int
+  sold         Int           @default(0)
+  isActive     Boolean       @default(true)
+  bookingItems BookingItem[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   @@unique([concertId, name])
   @@index([concertId])
   @@index([concertId, isActive])
+}
+
+model Booking {
+  id          String        @id @default(uuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  concertId   String
+  concert     Concert       @relation(fields: [concertId], references: [id], onDelete: Restrict)
+  status      BookingStatus @default(PENDING)
+  totalAmount Decimal       @db.Decimal(12, 2)
+  items       BookingItem[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([concertId])
+  @@index([status])
+  @@index([userId, status])
+}
+
+model BookingItem {
+  id               String         @id @default(uuid())
+  bookingId        String
+  booking          Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  ticketCategoryId String
+  ticketCategory   TicketCategory @relation(fields: [ticketCategoryId], references: [id], onDelete: Restrict)
+  quantity         Int
+  unitPrice        Decimal        @db.Decimal(12, 2)
+  lineTotal        Decimal        @db.Decimal(12, 2)
+  createdAt        DateTime       @default(now())
+
+  @@index([bookingId])
+  @@index([ticketCategoryId])
 }

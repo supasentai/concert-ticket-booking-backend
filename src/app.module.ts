@@ -5,6 +5,7 @@ import * as Joi from 'joi';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
+import { BookingsModule } from './bookings/bookings.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { ConcertsModule } from './concerts/concerts.module';
 import { TicketCategoriesModule } from './ticket-categories/ticket-categories.module';
@@ -56,6 +57,7 @@ import { UsersModule } from './users/users.module';
     UsersModule,
     ConcertsModule,
     TicketCategoriesModule,
+    BookingsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { ConcertStatus, Role } from '../generated/prisma/enums';
+import { BookingStatus, ConcertStatus, Role } from '../generated/prisma/enums';
 import { AppModule } from '../src/app.module';
 
 type AuthResponse = {
@@ -46,6 +46,27 @@ type TicketCategoryResponse = {
   isActive?: boolean;
 };
 
+type BookingResponse = {
+  id: string;
+  userId: string;
+  concertId: string;
+  concertTitle: string;
+  status: BookingStatus;
+  totalAmount: string;
+  items: {
+    id: string;
+    ticketCategoryId: string;
+    ticketCategoryName: string;
+    quantity: number;
+    unitPrice: string;
+    lineTotal: string;
+  }[];
+  createdAt: string;
+  updatedAt: string;
+  passwordHash?: string;
+  refreshTokenHash?: string;
+};
+
 type PaginatedConcertResponse = {
   data: ConcertResponse[];
   meta: {
@@ -77,11 +98,12 @@ type PaginatedPublicConcertResponse = {
   };
 };
 
-describe('Phase 02 concert management (e2e)', () => {
+describe('Concert ticket booking API (e2e)', () => {
   let app: INestApplication<App>;
   let pool: Pool;
   let operator: AuthResponse;
   let customer: AuthResponse;
+  let otherCustomer: AuthResponse;
   let publishedConcert: ConcertResponse;
   let publishedCategory: TicketCategoryResponse;
   let inactivePublishedCategory: TicketCategoryResponse;
@@ -94,6 +116,7 @@ describe('Phase 02 concert management (e2e)', () => {
   const runId = Date.now();
   const titlePrefix = `E2E Phase02 ${runId}`;
   const customerEmail = `customer-${runId}@example.com`;
+  const otherCustomerEmail = `other-customer-${runId}@example.com`;
   const operatorEmail = `operator-${runId}@example.com`;
   const authCustomerEmail = `auth-customer-${runId}@example.com`;
   const roleAttemptEmail = `role-attempt-${runId}@example.com`;
@@ -122,9 +145,11 @@ describe('Phase 02 concert management (e2e)', () => {
     await cleanupUsers();
     await insertUser(operatorEmail, Role.OPERATOR);
     await insertUser(customerEmail, Role.CUSTOMER);
+    await insertUser(otherCustomerEmail, Role.CUSTOMER);
 
     operator = await login(operatorEmail);
     customer = await login(customerEmail);
+    otherCustomer = await login(otherCustomerEmail);
     await createSharedFixtures();
   });
 
@@ -536,6 +561,395 @@ describe('Phase 02 concert management (e2e)', () => {
     });
   });
 
+  describe('booking workflow', () => {
+    it('rejects unauthenticated and operator booking creation', async () => {
+      await request(app.getHttpServer()).post('/bookings').send({}).expect(401);
+
+      await request(app.getHttpServer())
+        .post('/bookings')
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({
+          concertId: publishedConcert.id,
+          ticketCategoryId: publishedCategory.id,
+          quantity: 1,
+        })
+        .expect(403);
+    });
+
+    it('creates a pending booking and atomically increases sold tickets', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Create`,
+        5,
+      );
+
+      const response = await createBooking(concert.id, category.id, 2);
+      const booking = response.body as BookingResponse;
+
+      expect(booking).toMatchObject({
+        userId: customer.user.id,
+        concertId: concert.id,
+        status: BookingStatus.PENDING,
+        totalAmount: '99.98',
+      });
+      expect(booking.items).toEqual([
+        expect.objectContaining({
+          ticketCategoryId: category.id,
+          quantity: 2,
+          unitPrice: '49.99',
+          lineTotal: '99.98',
+        }),
+      ]);
+      expect(booking.passwordHash).toBeUndefined();
+      expect(booking.refreshTokenHash).toBeUndefined();
+      await expectCategorySold(category.id, 2);
+
+      const detailResponse = await request(app.getHttpServer())
+        .get(`/bookings/${booking.id}`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(200);
+      expect((detailResponse.body as BookingResponse).id).toBe(booking.id);
+
+      const listResponse = await request(app.getHttpServer())
+        .get('/bookings/me')
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(200);
+      const bookings = listResponse.body as BookingResponse[];
+      expect(bookings.map((item) => item.id)).toContain(booking.id);
+    });
+
+    it('returns not found for invalid concerts and categories', async () => {
+      const missingConcertId = randomUUID();
+
+      await createBooking(missingConcertId, randomUUID(), 1).expect(404);
+
+      await createBooking(publishedConcert.id, randomUUID(), 1).expect(404);
+    });
+
+    it('rejects unpublished concerts and mismatched categories', async () => {
+      const draft = await createConcert(`${titlePrefix} Booking Draft Concert`);
+      const draftCategory = await createCategory(
+        draft.id,
+        `${titlePrefix} Booking Draft GA`,
+      );
+      const other = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Other Concert`,
+        5,
+      );
+
+      await createBooking(draft.id, draftCategory.id, 1).expect(409);
+      await createBooking(publishedConcert.id, other.category.id, 1).expect(
+        404,
+      );
+    });
+
+    it('rejects invalid booking payloads and protected field injection', async () => {
+      const invalidRequests = [
+        { quantity: 0 },
+        { quantity: -1 },
+        { quantity: 1.5 },
+        { concertId: 'not-a-uuid' },
+        { status: BookingStatus.PAID },
+      ];
+
+      for (const override of invalidRequests) {
+        await request(app.getHttpServer())
+          .post('/bookings')
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({
+            concertId: publishedConcert.id,
+            ticketCategoryId: publishedCategory.id,
+            quantity: 1,
+            ...override,
+          })
+          .expect(400);
+      }
+    });
+
+    it('rejects insufficient tickets and rolls back the booking', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Insufficient`,
+        1,
+      );
+
+      await createBooking(concert.id, category.id, 2).expect(409);
+
+      await expectCategorySold(category.id, 0);
+      await expectBookingCount(concert.id, 0);
+    });
+
+    it('prevents overselling with repeated reservations', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Oversell`,
+        1,
+      );
+
+      await createBooking(concert.id, category.id, 1).expect(201);
+      await createBooking(concert.id, category.id, 1).expect(409);
+
+      await expectCategorySold(category.id, 1);
+      await expectBookingCount(concert.id, 1);
+    });
+
+    it('prevents overselling under concurrent booking requests', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Concurrent Oversell`,
+        2,
+      );
+
+      const responses = await Promise.all([
+        createBooking(concert.id, category.id, 1),
+        createBooking(concert.id, category.id, 1),
+        createBooking(concert.id, category.id, 1),
+        createBooking(concert.id, category.id, 1),
+      ]);
+      const statuses = responses.map((response) => response.status);
+
+      expect(statuses.filter((status) => status === 201)).toHaveLength(2);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(2);
+      await expectCategorySold(category.id, 2);
+      await expectBookingCount(concert.id, 2);
+      await expectBookingItemCount(concert.id, 2);
+    });
+
+    it('marks a pending booking paid and rejects duplicate payment', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Pay`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      const payResponse = await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ success: true })
+        .expect(200);
+
+      expect((payResponse.body as BookingResponse).status).toBe(
+        BookingStatus.PAID,
+      );
+      await expectCategorySold(category.id, 1);
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ success: true })
+        .expect(409);
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(409);
+    });
+
+    it('rejects invalid payment payloads and protects ownership', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Payment Auth`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ success: 'yes' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .send({ success: true })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${otherCustomer.tokens.accessToken}`)
+        .send({ success: true })
+        .expect(403);
+    });
+
+    it('prevents duplicate payment effects under concurrent requests', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Concurrent Pay`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      const responses = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/pay`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({ success: true }),
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/pay`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({ success: true }),
+      ]);
+      const statuses = responses.map((response) => response.status);
+
+      expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectBookingStatus(booking.id, BookingStatus.PAID);
+      await expectCategorySold(category.id, 1);
+    });
+
+    it('fails mock payment by cancelling once and restoring stock once', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Failed Payment`,
+        3,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 2);
+      const booking = createResponse.body as BookingResponse;
+
+      await expectCategorySold(category.id, 2);
+
+      const failedPaymentResponse = await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ success: false })
+        .expect(200);
+
+      expect((failedPaymentResponse.body as BookingResponse).status).toBe(
+        BookingStatus.CANCELLED,
+      );
+      await expectCategorySold(category.id, 0);
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/pay`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .send({ success: true })
+        .expect(409);
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(409);
+      await expectCategorySold(category.id, 0);
+    });
+
+    it('cancels a pending booking and rejects duplicate cancellation', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Cancel`,
+        4,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 3);
+      const booking = createResponse.body as BookingResponse;
+
+      const cancelResponse = await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(200);
+
+      expect((cancelResponse.body as BookingResponse).status).toBe(
+        BookingStatus.CANCELLED,
+      );
+      await expectCategorySold(category.id, 0);
+
+      await request(app.getHttpServer())
+        .post(`/bookings/${booking.id}/cancel`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(409);
+    });
+
+    it('restores stock once under concurrent duplicate cancellation', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Concurrent Cancel`,
+        3,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 2);
+      const booking = createResponse.body as BookingResponse;
+
+      const responses = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/cancel`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`),
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/cancel`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`),
+      ]);
+      const statuses = responses.map((response) => response.status);
+
+      expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      await expectBookingStatus(booking.id, BookingStatus.CANCELLED);
+      await expectCategorySold(category.id, 0);
+    });
+
+    it('allows only one winner in a concurrent payment and cancellation race', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Pay Cancel Race`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      const responses = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/pay`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+          .send({ success: true }),
+        request(app.getHttpServer())
+          .post(`/bookings/${booking.id}/cancel`)
+          .set('Authorization', `Bearer ${customer.tokens.accessToken}`),
+      ]);
+      const statuses = responses.map((response) => response.status);
+      const finalStatus = await getBookingStatus(booking.id);
+
+      expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+      expect(statuses.filter((status) => status === 409)).toHaveLength(1);
+      expect([BookingStatus.PAID, BookingStatus.CANCELLED]).toContain(
+        finalStatus,
+      );
+      await expectCategorySold(
+        category.id,
+        finalStatus === BookingStatus.PAID ? 1 : 0,
+      );
+    });
+
+    it('keeps booking price snapshots stable after category price changes', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Price Snapshot`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      await pool.query('UPDATE "TicketCategory" SET price = $1 WHERE id = $2', [
+        '199.99',
+        category.id,
+      ]);
+
+      const detailResponse = await request(app.getHttpServer())
+        .get(`/bookings/${booking.id}`)
+        .set('Authorization', `Bearer ${customer.tokens.accessToken}`)
+        .expect(200);
+      const detail = detailResponse.body as BookingResponse;
+
+      expect(detail.totalAmount).toBe('49.99');
+      expect(detail.items[0].unitPrice).toBe('49.99');
+      expect(detail.items[0].lineTotal).toBe('49.99');
+    });
+
+    it('prevents customers from reading another customer booking', async () => {
+      const { concert, category } = await createPublishedBookingFixture(
+        `${titlePrefix} Booking Ownership`,
+        2,
+      );
+      const createResponse = await createBooking(concert.id, category.id, 1);
+      const booking = createResponse.body as BookingResponse;
+
+      await request(app.getHttpServer())
+        .get(`/bookings/${booking.id}`)
+        .set('Authorization', `Bearer ${otherCustomer.tokens.accessToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`/bookings/${booking.id}`)
+        .expect(401);
+      await request(app.getHttpServer())
+        .get('/bookings/me')
+        .set('Authorization', `Bearer ${operator.tokens.accessToken}`)
+        .expect(403);
+    });
+  });
+
   async function createSharedFixtures(): Promise<void> {
     draftConcert = await createConcert(`${titlePrefix} Draft Concert`);
     noCategoryConcert = await createConcert(
@@ -635,6 +1049,32 @@ describe('Phase 02 concert management (e2e)', () => {
     return response.body as ConcertResponse;
   }
 
+  async function createPublishedBookingFixture(
+    title: string,
+    quantity: number,
+  ): Promise<{ concert: ConcertResponse; category: TicketCategoryResponse }> {
+    const concert = await createConcert(title);
+    const category = await createCategory(concert.id, `${title} GA`, {
+      price: 49.99,
+      quantity,
+    });
+    const published = await publishConcert(concert.id);
+
+    return { concert: published, category };
+  }
+
+  function createBooking(
+    concertId: string,
+    ticketCategoryId: string,
+    quantity: number,
+    accessToken = customer.tokens.accessToken,
+  ): request.Test {
+    return request(app.getHttpServer())
+      .post('/bookings')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ concertId, ticketCategoryId, quantity });
+  }
+
   async function login(email: string): Promise<AuthResponse> {
     const response = await request(app.getHttpServer())
       .post('/auth/login')
@@ -670,10 +1110,66 @@ describe('Phase 02 concert management (e2e)', () => {
       });
   }
 
+  async function expectCategorySold(
+    categoryId: string,
+    sold: number,
+  ): Promise<void> {
+    const result = await pool.query<{ sold: number }>(
+      'SELECT sold FROM "TicketCategory" WHERE id = $1',
+      [categoryId],
+    );
+
+    expect(result.rows[0]?.sold).toBe(sold);
+  }
+
+  async function expectBookingCount(
+    concertId: string,
+    count: number,
+  ): Promise<void> {
+    const result = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM "Booking" WHERE "concertId" = $1',
+      [concertId],
+    );
+
+    expect(Number(result.rows[0]?.count)).toBe(count);
+  }
+
+  async function expectBookingItemCount(
+    concertId: string,
+    count: number,
+  ): Promise<void> {
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM "BookingItem" item
+       INNER JOIN "Booking" booking ON booking.id = item."bookingId"
+       WHERE booking."concertId" = $1`,
+      [concertId],
+    );
+
+    expect(Number(result.rows[0]?.count)).toBe(count);
+  }
+
+  async function getBookingStatus(bookingId: string): Promise<BookingStatus> {
+    const result = await pool.query<{ status: BookingStatus }>(
+      'SELECT status FROM "Booking" WHERE id = $1',
+      [bookingId],
+    );
+
+    return result.rows[0].status;
+  }
+
+  async function expectBookingStatus(
+    bookingId: string,
+    status: BookingStatus,
+  ): Promise<void> {
+    await expect(getBookingStatus(bookingId)).resolves.toBe(status);
+  }
+
   async function cleanupUsers(): Promise<void> {
     for (const email of [
       authCustomerEmail,
       customerEmail,
+      otherCustomerEmail,
       operatorEmail,
       roleAttemptEmail,
     ]) {
@@ -682,6 +1178,10 @@ describe('Phase 02 concert management (e2e)', () => {
   }
 
   async function cleanupConcerts(): Promise<void> {
+    await pool.query(
+      'DELETE FROM "Booking" WHERE "concertId" IN (SELECT id FROM "Concert" WHERE title LIKE $1)',
+      [`${titlePrefix}%`],
+    );
     await pool.query('DELETE FROM "Concert" WHERE title LIKE $1', [
       `${titlePrefix}%`,
     ]);
