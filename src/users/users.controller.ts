@@ -1,9 +1,12 @@
 import { Controller, Get, NotFoundException, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Role } from '../../generated/prisma/enums';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -24,6 +27,8 @@ export class UsersController {
   @Get('me')
   @ApiOperation({ summary: 'Get the current authenticated user' })
   @ApiOkResponse({ type: UserResponseDto })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token.' })
+  @ApiNotFoundResponse({ description: 'User not found.' })
   async getMe(
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<UserResponseDto> {
@@ -40,6 +45,8 @@ export class UsersController {
   @Roles(Role.OPERATOR)
   @ApiOperation({ summary: 'List users as an operator' })
   @ApiOkResponse({ type: UserResponseDto, isArray: true })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid access token.' })
+  @ApiForbiddenResponse({ description: 'Operator role is required.' })
   async findAll(): Promise<UserResponseDto[]> {
     return this.usersService.findAll();
   }
