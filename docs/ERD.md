@@ -20,7 +20,7 @@ erDiagram
     string email UK
     string passwordHash
     string fullName
-    Role role
+    string role
     string refreshTokenHash
     datetime createdAt
     datetime updatedAt
@@ -32,7 +32,7 @@ erDiagram
     string venue
     datetime startTime
     datetime endTime
-    ConcertStatus status
+    string status
     datetime publishedAt
     string createdById FK
     datetime createdAt
@@ -55,13 +55,13 @@ erDiagram
     string id PK
     string userId FK
     string concertId FK
-    BookingStatus status
+    string status
     decimal subtotal
     decimal discountAmount
     decimal totalAmount
     string voucherId FK
     string voucherCodeSnapshot
-    VoucherDiscountType voucherDiscountTypeSnapshot
+    string voucherDiscountTypeSnapshot
     decimal voucherDiscountValueSnapshot
     decimal voucherMaximumDiscountAmountSnapshot
     datetime createdAt
@@ -81,7 +81,7 @@ erDiagram
   Voucher {
     string id PK
     string code UK
-    VoucherDiscountType discountType
+    string discountType
     decimal discountValue
     decimal maximumDiscountAmount
     decimal minimumOrderAmount
@@ -99,8 +99,8 @@ erDiagram
     string id PK
     string voucherId FK
     string userId FK
-    string bookingId UK_FK
-    VoucherUsageStatus status
+    string bookingId FK
+    string status
     datetime createdAt
     datetime releasedAt
   }
