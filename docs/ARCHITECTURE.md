@@ -2,23 +2,7 @@
 
 ## System Context
 
-```mermaid
-flowchart LR
-  PublicClient[Public browser or API client]
-  CustomerClient[Customer client]
-  OperatorClient[Operator dashboard client]
-  Swagger[Swagger UI /api/docs]
-  Postman[Postman collection]
-  API[NestJS API]
-  DB[(PostgreSQL)]
-
-  PublicClient --> API
-  CustomerClient --> API
-  OperatorClient --> API
-  Swagger --> API
-  Postman --> API
-  API --> DB
-```
+![docs/diagrams/architecture_system_context.svg](diagrams/architecture_system_context.svg)
 
 The backend is a modular NestJS API backed by PostgreSQL. Swagger and Postman are developer-facing interfaces. PostgreSQL stores users, concerts, ticket categories, bookings, voucher usage, and operational data.
 
@@ -33,26 +17,7 @@ The backend is a modular NestJS API backed by PostgreSQL. Swagger and Postman ar
 
 ## Module Structure
 
-```mermaid
-flowchart TB
-  AppModule --> PrismaModule
-  AppModule --> AuthModule
-  AppModule --> UsersModule
-  AppModule --> ConcertsModule
-  AppModule --> TicketCategoriesModule
-  AppModule --> BookingsModule
-  AppModule --> VouchersModule
-  AppModule --> DashboardModule
-
-  AuthModule --> PrismaModule
-  UsersModule --> PrismaModule
-  ConcertsModule --> PrismaModule
-  TicketCategoriesModule --> PrismaModule
-  BookingsModule --> PrismaModule
-  BookingsModule --> VouchersModule
-  VouchersModule --> PrismaModule
-  DashboardModule --> PrismaModule
-```
+![docs/diagrams/architecture_module_structure.svg](diagrams/architecture_module_structure.svg)
 
 - `AuthModule`: registration, login, refresh rotation, logout.
 - `UsersModule`: current-user response and operator user listing.
@@ -99,16 +64,4 @@ The implementation relies on database atomicity and constraints rather than in-m
 
 ## High-Level Request Flow
 
-```mermaid
-flowchart LR
-  Client[Client] --> Controller[Controller + Swagger route]
-  Controller --> Guards[JWT guard / Roles guard]
-  Guards --> DTO[DTO validation]
-  DTO --> Service[Service business rules]
-  Service --> Prisma[PrismaService]
-  Prisma --> Postgres[(PostgreSQL)]
-  Postgres --> Prisma
-  Prisma --> Service
-  Service --> Response[Response DTO / serialized JSON]
-  Response --> Client
-```
+![docs/diagrams/architecture_request.svg](diagrams/architecture_request.svg)
